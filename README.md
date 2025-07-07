@@ -1542,3 +1542,797 @@ You can then interact with these endpoints inside your event handlers.
 ```
 
 ### `$app/state`
+SvelteKit has three readonly state objects available via the `$app/state` module: `page`, `navigation` and `updated`. The one you'll use most often is page, which provides information about the current page.
+- `url` - the URL of the current page
+- `params` - the current page's parameters
+- `route` - an object with an `id` property representing the current route
+- `status` - the HTTP status code of the current page
+- `error` - the error object of the current page, if any
+- `data` - the data for the current page, combining the return values for all the `load` functions
+- `form` - the data returned from a form action
+
+Each of these properties is reactive, using `$state.raw` under the hood.
+
+```
+// src/routes/+layout.svelte
+<script lang="ts">
+	import { page } from '$app/state';
+
+	let { children } = $props();
+</script>
+
+<nav>
+	<a href="/" aria-current={page.url.pathname === '/'}>
+		home
+	</a>
+
+	<a href="/about" aria-current={page.url.pathname === '/about'}>
+		about
+	</a>
+</nav>
+
+{@render children()}
+```
+
+Note: Prior to SvelteKit 2.12, you had to use `$app/stores` for this, which provides a `$page` store with the same information
+
+#### `navigating`
+The `navigating` object represents the current navigation. When a navigation starts, because of a link click or a back/forward navigation, or a programmatic `goto`, the value of `navigating` will become an object with the following properties:
+
+- `from` and `to` - objects with `params`, `route` and `url` properties
+- `type` - the type of navigation, such as `link`, `popstate`, or `goto`
+
+It can be used to show loading indicators for long-running navigations.
+
+```
+<script lang="ts">
+	import { page, navigating } from '$app/state';
+
+	let { children } = $props();
+</script>
+
+<nav>
+	<a href="/" aria-current={page.url.pathname === '/'}>
+		home
+	</a>
+
+	<a href="/about" aria-current={page.url.pathname === '/about'}>
+		about
+	</a>
+
+	{#if navigating.to}
+		navigating to {navigating.to.url.pathname}
+	{/if}
+</nav>
+
+{@render children()}
+```
+
+#### `updated`
+The `updated` state contains `true` or `false` depending on whether a new version of the app has been deployed since the page was first opened. For this to work, your `svelte.config.js` must specify `kit.version.pollInterval`.
+
+Version changes only happen in production, not during development. So `updated.current` will always be false in dev mode.
+
+You can manually check for new versions, regardless of `pollInterval`, by calling `updated.check()`.
+
+```
+{#if updated.current}
+	<div class="toast">
+		<p>
+			A new version of the app is available
+
+			<button onclick={() => location.reload()}>
+				reload the page
+			</button>
+		</p>
+	</div>
+{/if}
+```
+
+### Errors and Redirects
+There are two types of errors in SvelteKit: expected errors and unexpected errors.
+
+An expected error is one that was thrown via the `error` helper from `@sveltejs/kit`.
+
+```
+// src/routes/expected/+page.server.js
+import { error } from '@sveltejs/kit';
+
+export function load() {
+	error(420, 'Enhance your calm');
+}
+```
+
+Any other error is treated as unexpected.
+
+When you throw an expected error, you're telling SvelteKit "don't worry, I know what I'm doing here". An unexpected error, by contrast, is assumed to be a bug in your app. When an unexpected error is throw, its message and stack trace will be logged to the console.
+
+Expected error messages are shown to the user, whereas unexpected error messages are redacted and replaced with a generic "Internal Error" and a 500 status code. This is because error messages can contain sensitive data.
+
+#### Error Pages
+When something goes wrong inside a `load` function SvelteKit renders an error page.
+
+You can customize the default error page by create a `src/routes/+error.svelte` component.
+
+```
+<script lang="ts">
+	import { page } from '$app/state';
+	import { emojis } from './emojis.js';
+</script>
+
+<h1>{page.status} {page.error.message}</h1>
+<span style="font-size: 10em">
+	{emojis[page.status] ?? emojis[500]}
+</span>
+```
+
+Notice that the `+error.svelte` component is rendered inside the root `+layout.svelte`. But you can create more granular `+error.svelte` boundaries.
+
+```
+// src/routes/expected/+error.svelte
+<h1>this error was expected</h1>
+```
+
+This component will be rendered for `/expected`, while the root `src/routes/+error/svelte` page will be rendered for any other errors that occur.
+
+#### Fallback Errors
+If things go really wrong, such as an error while loading the root layout data, or while rendering the error page, SvelteKit will fall back to a static error page.
+
+You can customize the fallback error page by creating a `src/error.html` file.
+
+```
+<h1>Game over</h1>
+<p>Code %sveltekit.status%</p>
+<p>%sveltekit.error.message%</p>
+```
+
+This file can include the following:
+- `%sveltekit.status%` - the HTTP status code
+- `%sveltekit.error.message%` - the error message
+
+#### Redirects
+You can use the `redirect` mechanism to redirect from one page to another.
+
+```
+// src/routes/a/+page.server.js
+import { redirect } from '@sveltejs/kit';
+
+export function load() {
+	redirect(307, '/b');
+}
+```
+
+You can `redirect` inside `load` functions, form actions, API routes and the `handle` hook.
+
+The most common status codes you'll use are:
+- `303` - for form actions, following a successful submission
+- `307` - for temporary redirects
+- `308` - for permanent redirects
+
+Note: `redirect()` throws, like `error()`, meaning no code *after* the redirect will run.
+
+### Hooks
+SvelteKit provides several hooks, ways to intercept and override the framework's default behaviour.
+#### `handle`
+`handle` is the most elementary hook. It lives in `src/hooks.server.js` and receives an `event` object along with a `resolve` function, and returns a `Response`.
+
+Within `resolve` SvelteKit matches the incoming request URL to a route of your app, imports the relevant code (such as from `+page.server.js` and `+page.svelte`), loads the data needed by the route, and generates the response.
+
+```
+export async function handle({ event, resolve }) {
+	return await resolve(event);
+}
+```
+
+For pages, as opposed to API routes, you can modify the generated HTML with `transformPageChunk`.
+
+You can also create entirely new routes
+
+```
+// src/hooks.server.js
+export async function handle({ event, resolve }) {
+	if (event.url.pathname === '/ping') {
+		return new Response('pong');
+	}
+
+	return await resolve(event, {
+		transformPageChunk: ({ html }) => html.replace(
+			'<body',
+			'<body style="color: hotpink"'
+		)
+	});
+}
+```
+
+#### The RequestEvent Object
+The `event` object passed into `handle` is the same object (an instance of `RequestEvent`) that is passed into API routes in `+server.js` files, form actions in `+page.server.js` files, and `load` functions in `+page.server.js` and `+layout.server.js`.
+
+It contains a number of useful properties and methods:
+- `cookies` - the cookies API
+- `fetch` - the standard Fetch API with additional powers
+- `getClientAddress()` - a function to get the client's IP address
+- `isDataRequest` - `true` if the browser is requesting data for a page during client-side navigation, `false` if a page/route is being requested directly
+- `locals` - a place to put arbitrary data
+- `params` - the route parameters
+- `route` - an object with an `id` property representing the route that was matched
+- `setHeaders()` - a function for setting HTTP headers on the response
+- `url` - a URL object representing the current request
+
+A useful pattern is to add some data to `event.locals` in handle so that it can be read in subsequent `load` functions
+
+```
+// src/hooks.server.js
+export async function handle({ event, resolve }) {
+	event.locals.answer = 42;
+	return await resolve(event);
+}
+
+// src/routes/+page.server.js
+export function load(event) {
+	return {
+		message: `the answer is ${event.locals.answer}`
+	};
+}
+```
+
+#### `handleFetch`
+The `event` object has a `fetch` method that behaves like the standard Fetch API but with superpowers;
+- it can be used to make credentialed requests on the server, as it inherits the `cookie` and `authorization` headers from the incoming request
+- it can make relative requests on the server (ordinarily, `fetch` requires a URL with an origin when used in a server context)
+- internal requests (such as for `+server.js` routes) go directly to the handler function when running on the server, without the overhead of a HTTP call
+
+Its behaviour can be modified with the `handleFetch` hook.
+
+```
+// src/hooks.server.js
+export async function handleFetch({ event, request, fetch }) {
+	return await fetch(request);
+}
+```
+
+`event.fetch` can also be called from the browser. In this scenario, `handleFetch` is useful if you have requests to a public URL like `https://api.yourapp.com` from the browser, that should be redirected to an internal URL (bypassing whatever proxies and load balancers sit between the API server and the public internet) when running on the server.
+
+#### `handleError`
+The `handleError` hook lets you intercept unexpected errors and trigger some behaviour, like pinging a Slack channel or sending data to an error logging service.
+
+The default behaviour is to log the error.
+
+```
+export function handleError({ event, error }) {
+	console.error(error.stack);
+}
+```
+
+SvelteKit does not show the error message to the user to avoid exposing sensitive information. The error object available to your application as `page.error` in your `+error.svelte` pages or `%sveltekit.error%` in your `src/error.html` fallback is just:
+
+```
+{
+	message: 'Internal Error' // or 'Not Found' for a 404
+}
+```
+
+In some situations, you might want to customize this. To do so, you can return an object from `handlError`
+
+```
+// src/hooks.server.js
+export function handleError({ event, error }) {
+	console.error(error.stack);
+
+	return {
+		message: 'everything is fine',
+		code: 'JEREMYBEARIMY'
+	};
+}
+```
+
+You can now reference properties other than `message` in a custom error page. 
+
+```
+// src/routes/+error.svelte
+<script lang="ts">
+	import { page } from '$app/state';
+</script>
+
+<h1>{page.status}</h1>
+<p>{page.error.message}</p>
+<p>error code: {page.error.code}</p>
+```
+
+### Page Options
+As well as exporting `load` functions, you can export various page options from `+page.js`, `+page.server.js`, `+layout.js`, `+layout.server.js`:
+- `ssr` - whether or not pages should be server-rendered
+- `csr` - whether to load the SvelteKit client
+- `prerender` - whether to prerender pages at build time, instead of per-request
+- `trailingSlash` - whether to strip, add, or ignore trailing slashes in URLS
+
+Page options can be applied to individual pages (if exported from `+page.js` or `+page.server.js`) or groups of pages (if exported from `+layout.js` or `+layout.server.js`). To define an option for the whole app, export it from the root layout.
+
+Child layouts and pages override values set in parent layout, so, for example, you can enable prerendering for your entire app and then disable it for pages that need to be dynamically rendered.
+
+You can mix and match these options in different areas of your app, for example: prerendering marketing pages, dynamically server-rendering data-driven pages, and treating your admin pages as a client-rendered SPA.
+
+#### Server-side Rendering (SSR)
+Server-side rendering is the process of generating HTML on the server. This is what SvelteKit does by default. It's important for performance and resilience, and is very beneficial for SEO.
+
+That said, some components cannot be rendered on the server, perhaps because they expect to be able to access browser globals like `window` immediately. If you can, you should change those components so that they can render on the server, but if you can't then you can disable SSR.
+
+```
+// src/routes/+page.server.js
+export const ssr = false;
+```
+
+Note: Setting `ssr` to `false` inside your root `+layout.server.js` effectively turns your entire app into a single-page app (SPA).
+
+#### Client-side Rendering (CSR)
+Client-side rendering is what makes the page interactive, such as incrementing a counter when you click a button, and enables SvelteKit to update the page upon navigation without a full-page reload.
+
+As with `ssr`, you can disable client-side rendering altogether:
+
+```
+// src/routes/+page.server.js
+export const csr = false;
+```
+
+This means that no JavaScript is served to the client, but it also means that your components re no longer interactive. It can be a useful way to test if your application is usable for people who, for whatever reason, cannot use JavaScript.
+
+#### Prerendering
+Prerendering means generating HTML for a page once, at build time, rather than dynamically for each request.
+
+The advantage is that serving static data is extremely cheap and performant, allowing you to easily serve large numbers of users without worrying about cache-control headers (which are easy to get wrong).
+
+The tradeoff is that the build process takes longer, and prerendered content can only be updated by building and deploying a new version of the application.
+
+To prerender a page, set `prerender` to `true`.
+
+```
+// src/routes/+page.server.js
+export const prerender = true;
+```
+
+Not all pages can be prerendered. The basic rule is: for content to be prerenderable, any two users hitting it directly must get the same content from the server, and the page must not contain any form actions. Pages with dynamic route parameters can be prerendered as long as they are specified in the `prerender.entries` configuration or can be reached by following links from pages that *are* in `prerender.entries`. 
+
+Note: Setting `prerender` to `true` inside your root `+layout.server.js` effectively turns SvelteKit into a static site generator (SSG).
+
+#### Trailing Slash
+Two URLs like `/foo` and `/foo/` might look the same but they're actually different. A relative URL like `./bar` will resolve to `/bar` in the first case and `/foo/bar` in the second, and search engines will treat them as separate entries, harming your SEO.
+
+By default, SvelteKit strips trailing slashes, meaning that a request for `/foo/` will result in a redirect to `/foo`.
+
+If you instead want to ensure that a trailing slash is always present, you can specify the `trailingSlash` option:
+
+```
+// src/toutes/always/+page.server.js
+export const trailingSlash = 'always';
+```
+
+To accommodate both cases (which is not recommended), use `ignore`.
+
+```
+// src/routes/ignore/+page.server.js
+export const trailingSlash = 'ignore';
+```
+
+The default value is `'never'`.
+
+Whether or not trailing slashes are applied affects prerendering. A URL like `/always/` will be saved to disk as `always/index.html` whereas a URL like `/never` will be saved as `never.html`.
+
+### Link Options
+#### Preloading
+You can't always make your data load more quickly but SvelteKit can speed up navigations by anticipating them.
+
+When an `<a>` element has a `data-sveltekit-preload-data` attribute, SvelteKit will begin the navigation as soon as the user hovers over the link (on desktop) or taps it (on mobile).
+
+```
+<nav>
+	<a href="/">home</a>
+	<a href="/fast" data-sveltekit-preload-data>fast</a>
+	<a href="/slow">slow</a>
+</nav>
+```
+
+Not waiting for a `click` event to be registered typically saves 200ms or more, which is enough to be the difference between feeling sluggish and snappy.
+
+You can put the attribute on individual links, or any element that contains links. The default project template includes the attribute on the `<body>` element.
+
+```
+<body data-sveltekit-preload-data>
+	%sveltekit.body%
+</body>
+```
+
+You can customize the behaviour further by specifying one of the following values for the attribute:
+- `"hover"` (default, falls back to `"tap"` on mobile)
+- `"tap"` - only begin preloading on tap
+- `"off"` - disable preloading
+
+Using `data-sveltekit-preload-data` may sometimes result in false positives, such as loading data in anticipation of a navigation that doesn't then happen, which might be undesirable.
+
+As an alternative, `data-sveltekit-preload-code` allows you to preload the JavaScript needed by a given route without eagerly loading its data. This attribute can have the following values:
+
+- "eager" - preload everything on the page following a navigation
+- "viewport" - preload everything as it appears in the viewport
+- "hover" - (default) same as above
+- "tap" - same as above
+- "off" - same as above
+
+You can also initiate preloading programmatically with `preloadCode` and `preloadData` imported from `$app/navigation`:
+
+```
+import { preloadCode, preloadData } from '$app/navigation';
+
+// preload the code and data needed to navigate to /foo
+preloadData('/foo');
+
+// preload the code needed to navigate to /bar, but not the data
+preloadCode('/bar');
+```
+
+#### Reloading the page
+Ordinarily, SvelteKit will navigate between pages without refreshing the page. In rare cases you might want to disable this behaviour. You can do so by adding the `data-sveltekit-reload` attribute on an individual link, or nay element that contains links:
+
+```
+<nav data-sveltekit-reload>
+	<a href="/">home</a>
+	<a href="/about">about</a>
+</nav>
+```
+
+### Advanced Routing
+#### Optional Parameters
+Sometimes it's helpful to make a parameter optional. A classic example is when you use the pathname to determine the locale, `/fr/...`, `/de/...` and so on, but you also want to have a default locale.
+
+To do that, use double brackets, for example `src/routes/[[lang]]/+page.svelte`.
+
+```
+// src/routes/[[lang]]/+page.server.js
+const greetings = {
+	en: 'hello!',
+	de: 'hallo!',
+	fr: 'bonjour!'
+};
+
+export function load({ params }) {
+	return {
+		greeting: greetings[params.lang ?? 'en']
+	};
+}
+```
+
+#### Rest Parameters
+To match an unknown number of path segments, use a `[...rest]` parameter, so named for its resemblance to rest parameters in JavaScript.
+
+So `src/routes/[...path]` would match any path.
+
+Note: Other, more specific routes will be tested first making rest parameters useful as "catch-all" routes. For example, if you needed a custom 404 page for pages inside `/categories/...` you could add `src/routes/categories/[...catchall]/+error.svelte` and `src/routes/categories/[...catchall]/+page.server.js`.
+
+Rest parameters do not need to go at the end. A route like `/items/[...path]/edit` or `/items/[...path].json` would be totally valid.
+
+#### Param Matchers
+To prevent the router from matching on an invalid input, you can specify a matcher. For example, you might want a route like `/colors/[value]` to match hex values like `/colors/ff3e00` but not named colours like `/colors/octarine` or any other arbitrary input.
+
+Export a `match` function from `src/params`
+
+```
+src/params/hex.js
+export function match(value) {
+	return /^[0-9a-f]{6}$/.test(value);
+}
+```
+
+Then, to use the matcher, name the route to include the matcher `src/routes/colors/[color=hex]`
+
+Now whenever someone navigates to that route, SvelteKit will verify that `color` is a valid `hex` value. If not, SvelteKit will try to match other routes, before eventually returning a 404.
+
+Note: Matchers run on both the server and in the browser.
+
+#### Route Groups
+Layouts let you share UI and data loading logic between different routes. Sometimes it's useful to use layouts without affecting the route. For example you might need `/app` and `/account` to be behind authentication but `/about` to be open to the world. You can do this with a route group, which is a directory in parentheses.
+
+For example, you can create an `(authed)` group: `src/routes/(authed)/+layout.server.js`
+
+```
+import { redirect } from '@sveltejs/kit';
+
+export function load({ cookies, url }) {
+	if (!cookies.get('logged_in')) {
+		redirect(303, `/login?redirectTo=${url.pathname}`);
+	}
+}
+```
+
+If you try to visit pages like `(authed)/app` or `(authed)/account`, you'll be redirected to the `/login` route where you can use a form action to set a `logged_in` cookie.
+
+You can also add some UI to the authed routes using `src/routes/(authed)/+layout.svelte`.
+
+```
+<script lang="ts">
+	let { children } = $props();
+</script>
+
+{@render children()}
+
+<form method="POST" action="/logout">
+	<button>log out</button>
+</form>
+```
+
+#### Breaking Out of Layouts
+Ordinarily a page inherits every layout above it. So `src/routes/a/b/c/+page.svelte` inherits layouts from:
+
+-  `src/routes/+layout.svelte`
+- `src/routes/a/+layout.svelte`
+- `src/routes/a/b/+layout.svelte`
+- `src/routes/a/b/c/+layout.svelte`
+
+Occasionally, it's useful to break out of the current layout hierarchy. You can do this by adding the `@` sign followed by the name of the parent segment to "reset" to. For example, `+page@b.svelte` would put `a/b/c` inside `src/routes/a/b/+layout.svelte` while `+page@a.svelte` would put it inside `src/routes/a/+layout.svelte`. 
+
+`+page@.svelte` would reset all the way to the root layout.
+
+Note: The root layout applies to every page of your app, you cannot break out of it.
+
+### Advanced Loading
+#### Universal Load Functions
+Loading data from the server using `+page.server.js` and `+layout.server.js` is very convenient if you need to do things like getting data directly from a database, or reading cookies.
+
+Sometimes it doesn't make sense to load data from the server when doing a client-side navigation. For example:
+
+- You're loading data from an external API
+- You want to use in-memory data if it's available
+- You want to delay navigation until an image has been preloaded, to avoid pop-in
+- You need to return something from `load` that can't be serialized (SvelteKit uses devalue to turn server data into JSON), such as a component or store
+
+To turn a server `load` function into a universal `load` function, rename it from `+page.server.js` to `+page.js`. Now the function will run on the server during server-side rendering, but will also run int he browser when the app hydrates or the user performs a client-side navigation.
+
+#### Using Both Load Functions
+Occasionally you might need to use a server load function and a universal load function together. For example, you might need to return data from the server, but also return a value that can't be serialized as server data.
+
+As an example, you want to return a different component from `load` depending on whether the data you got from `src/routes/+page.server.js` is `cool` or not.
+
+You can access server data in `src/routes/+page.js` via the `data` property.
+
+```
+// src/routes/+page.js
+export async function load({ data }) {
+	const module = data.cool
+		? await import('./CoolComponent.svelte')
+		: await import('./BoringComponent.svelte');
+
+	return {
+		component: module.default,
+		message: data.message
+	};
+}
+```
+
+Note: the data isn't merged, you must explicitly return `message` from the universal `load` function.
+
+#### Using Parent Data
+`+page.svelte` and `+layout.svelte` components have access to everything returned from their parent `load` functions.
+
+Occasionally it's useful for the `load` functions themselves to access data from their parents. This can be done with `await parent()`
+
+```
+// src/routes/+layout.server.js
+export function load() {
+	return { a: 1 };
+}
+```
+
+```
+// src/routes/sum/+layout.js
+export async function load({ parent }) {
+	const { a } = await parent();
+	return { b: a + 1 };
+}
+```
+
+```
+// src/routes/sum/+page.js
+export async function load({ parent }) {
+	const { a, b } = await parent();
+	return { c: a + b };
+}
+```
+
+Note: a universal `load` function can get data from a parent server `load` function. The reverse is not true. A server `load` function can only get parent data from another server `load` function.
+
+Take care not to introduce waterfalls when using `await parent()`. If you can `fetch` other data that is not dependent on parent data, do that first.
+
+#### Invalidation
+When a user navigates from one page to another, SvelteKit calls your `load` functions, but only if it thinks something has changed.
+
+You can manually invalidate by using the `invalidate(...)` function, which takes a URL and re-runs any `load` functions that depend on that. For example, if a `load` function in `src/routes/+layout.js` calls `fetch("/api/now")` it depends on `/api/now`.
+
+In this `src/routes/[...timezone]/+page.svelte` example, you can add an `onMount` callback that calls `invalidate(/api/now)` once a second:
+
+```
+// src/routes/[...timezone]/+page.svelte
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { invalidate } from '$app/navigation';
+
+	let { data } = $props();
+
+	onMount(() => {
+		const interval = setInterval(() => {
+			invalidate('/api/now');
+		}, 1000);
+
+		return () => {
+			clearInterval(interval);
+		};
+	});
+</script>
+
+<h1>
+	{new Intl.DateTimeFormat([], {
+		timeStyle: 'full',
+		timeZone: data.timezone
+	}).format(new Date(data.now))}
+</h1>
+```
+
+Note: You can also pass a function to `invalidate` in case you want to invalidate based on a pattern and not specific URLs.
+
+#### Custom Dependencies
+Calling `fetch(url)` inside a `load` function registers `url` as a dependency. Sometimes it's not appropriate to use `fetch`, in which case you can specify a dependency manually with the `depends(url)` function.
+
+Since any string that begins with an `[a-z]+:` pattern is a valid URL, you can create custom invalidation keys like `data:now`.
+
+```
+// src/routes/+layout.js
+export async function load({ depends }) {
+	depends('data:now');
+
+	return {
+		now: Date.now()
+	};
+}
+```
+
+```
+// src/routes/[...timezone]/+page.svelte
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { invalidate } from '$app/navigation';
+
+	let { data } = $props();
+
+	onMount(() => {
+		const interval = setInterval(() => {
+			invalidate('data:now');
+		}, 1000);
+
+		return () => {
+			clearInterval(interval);
+		};
+	});
+</script>
+```
+
+#### `invalidateAll`
+`invalidateAll` is kind of the nuclear option. This will indiscriminately re-run all `load` functions for the current page, regardless of what they depend on.
+
+```
+// src/routes/[...timezone]/+page.svelte
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
+
+	let { data } = $props();
+
+	onMount(() => {
+		const interval = setInterval(() => {
+			invalidateAll();
+		}, 1000);
+
+		return () => {
+			clearInterval(interval);
+		};
+	});
+</script>
+```
+
+So the `depends` call is no longer necessary.
+
+Note: `invalidate(() => true)` and `invalidateAll` are *not* the same. `invalidateAll` also re-runs `load` functions without any `url` dependencies, which `invalidate(() => true)` does not.
+
+### Environment Variables
+#### `$env/static/private`
+Environment variables, like API keys and database credentials, can be added to a `.env` file and they will be made available to your SvelteKit app.
+
+Note: You can also use `.env.local` or `.env.[mode]` files (see the Vite docs). Make sure you add these sensitive files to your `.gitignore` file. Environment variables in `process.env` are also available via `$env/static/private`.
+
+Environment variables can be imported from `$env/static/private`:
+
+```
+// src/routes/+page.server.js
+import { redirect, fail } from '@sveltejs/kit';
+import { PASSPHRASE } from '$env/static/private';
+
+export function load({ cookies }) {
+	if (cookies.get('allowed')) {
+		redirect(307, '/welcome');
+	}
+}
+
+export const actions = {
+	default: async ({ request, cookies }) => {
+		const data = await request.formData();
+
+		if (data.get('passphrase') === PASSPHRASE) {
+			cookies.set('allowed', 'true', {
+				path: '/'
+			});
+
+			redirect(303, '/welcome');
+		}
+
+		return fail(403, {
+			incorrect: true
+		});
+	}
+};
+```
+
+It is important that sensitive data doesn't accidentally end up being sent to the browser, where it could easily be stolen.
+
+SvelteKit prevents this. If you try to import a variable from `$env/static/secret` into a `+page.svelte` file, you will get an error overlay popup telling you that `$env/static/private` cannot be imported into client-side code. It can only be imported into server modules:
+
+- `+page.server.js`
+- `+layout.server.js`
+- `+server.js`
+- any module ending with `.server.js`
+- any modules inside `src/lib/server`
+
+In turn, these modules can only be imported by *other* server modules.
+
+The `static` in `$env/static/private` indicates that these values are known at build time and can be statically replaced. This enables useful optimizations.
+
+```
+import { FEATURE_FLAG_X } from '$env/static/private';
+
+if (FEATURE_FLAG_X === 'enabled') {
+	// code in here will be removed from the build output
+	// if FEATURE_FLAG_X is not enabled
+}
+```
+
+#### `$env/dynamic/private`
+If you need to read the values of environment variables when the app runs, as opposed to when the app is built, you can use `$env/dynamic/private` instead of `$enc/static/private`.
+
+```
+import { env } from '$env/dynamic/private';
+...
+if (data.get('passphrase') === env.PASSPHRASE) {
+	cookies.set('allowed', 'true', {
+		path: '/'
+	});
+
+	redirect(303, '/welcome');
+}
+```
+
+#### `$env/static/public`
+Some environment variables can be safely exposed to the browser. These are distinguished from private environment variables with a `PUBLIC_` prefix.
+
+These can then be imported from `$env/static/public`.
+
+```
+import {
+		PUBLIC_THEME_BACKGROUND,
+		PUBLIC_THEME_FOREGROUND
+	} from '$env/static/public';
+```
+
+#### `$env/dynamic/public`
+As with private environment variables, it's preferable to use static values if possible, but if necessary you can use dynamic values instead.
+
+```
+import { env } from '$env/dynamic/public';
+...
+<main
+	style:background={env.PUBLIC_THEME_BACKGROUND}
+	style:color={env.PUBLIC_THEME_FOREGROUND}
+>...</main>
+```
